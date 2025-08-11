@@ -14,7 +14,7 @@ class EntryScreenApp:
 
         ttk.Label(root, text="Magento 2 Root Path:", font=("Arial", 12)).pack(pady=(20, 5))
         self.path_entry = ttk.Entry(root, width=50)
-        self.path_entry.insert(0, "/Users/ccastro/Projects/Bold/magento2-projects/magento-community-booster/")
+        self.path_entry.insert(0, "/Users/")
         self.path_entry.pack(pady=5)
         ttk.Button(root, text="Browse", command=self.browse_path).pack()
 

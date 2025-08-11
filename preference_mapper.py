@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 import json
 import csv
+import re
 
 class PreferenceMapperApp:
     def __init__(self, root, base_path):
@@ -21,14 +22,45 @@ class PreferenceMapperApp:
         ttk.Label(self.root, text="Vendor Filter (comma-separated):").pack(anchor="w", padx=10, pady=(10, 0))
         self.vendor_entry = ttk.Entry(self.root, width=80)
         self.vendor_entry.insert(0, "all")
-        self.vendor_entry.pack(padx=10, pady=5)
+        self.vendor_entry.pack(anchor="w", padx=10, pady=5)
 
-        self.sort_mode = tk.StringVar(master=self.root, value="asc_name")
-        ttk.Label(self.root, text="Sort by:").pack(anchor="w", padx=10)
-        sort_options = ["asc_name", "desc_name", "asc_count", "desc_count"]
-        self.sort_menu = ttk.Combobox(self.root, textvariable=self.sort_mode, values=sort_options, state="readonly", width=20)
-        self.sort_menu.pack(anchor="w", padx=10, pady=(0, 10))
-        self.sort_menu.bind("<<ComboboxSelected>>", lambda e: self.display_results())
+        self.order_mode = tk.StringVar(master=self.root, value="asc_name")
+        ttk.Label(self.root, text="Order by:").pack(anchor="w", padx=10)
+        order_options = ["asc_name", "desc_name", "asc_count", "desc_count"]
+        self.order_menu = ttk.Combobox(self.root, textvariable=self.order_mode, values=order_options, state="readonly", width=20)
+        self.order_menu.pack(anchor="w", padx=10, pady=(0, 10))
+        self.order_menu.bind("<<ComboboxSelected>>", lambda e: self.display_results())
+
+        # Quick text filter (applies to interface, class, module, and area)
+        ttk.Label(self.root, text="Filter (contains):").pack(anchor="w", padx=10)
+        self.quick_filter = tk.StringVar(master=self.root, value="")
+        self.quick_filter_entry = ttk.Entry(self.root, width=80, textvariable=self.quick_filter)
+        self.quick_filter_entry.pack(anchor="w", padx=10, pady=(0, 10))
+        self.quick_filter_entry.bind("<KeyRelease>", lambda e: self.display_results())
+
+        # Filter mode and case sensitivity
+        ttk.Label(self.root, text="Filter mode:").pack(anchor="w", padx=10)
+        self.filter_mode = tk.StringVar(master=self.root, value="contains")
+        fm_frame = ttk.Frame(self.root)
+        fm_frame.pack(anchor="w", padx=10, pady=(0, 6))
+        for mode_option in ["contains", "regex", "startswith", "endswith", "equals"]:
+            ttk.Radiobutton(fm_frame, text=mode_option, value=mode_option,
+                            variable=self.filter_mode, command=self.display_results).pack(side="left", padx=(0, 10))
+        self.filter_case = tk.IntVar(master=self.root, value=0)
+        ttk.Checkbutton(self.root, text="Case sensitive", variable=self.filter_case).pack(anchor="w", padx=20)
+
+        # Area filters (global / frontend / adminhtml)
+        ttk.Label(self.root, text="Area Filters:").pack(anchor="w", padx=10, pady=(10, 0))
+        self.area_vars = {
+            "global": tk.IntVar(master=self.root, value=1),
+            "frontend": tk.IntVar(master=self.root, value=1),
+            "adminhtml": tk.IntVar(master=self.root, value=1),
+        }
+        for area_key in ("global", "frontend", "adminhtml"):
+            ttk.Checkbutton(self.root, text=area_key, variable=self.area_vars[area_key]).pack(anchor="w", padx=20)
+        # Option to include ANY etc/* area (ignore area filter)
+        self.include_all_areas = tk.IntVar(master=self.root, value=1)
+        ttk.Checkbutton(self.root, text="Include ANY etc/* area (ignore area filter)", variable=self.include_all_areas).pack(anchor="w", padx=20)
 
         # Scan button
         ttk.Button(self.root, text="Scan Preferences", command=self.scan).pack(pady=10)
@@ -84,17 +116,23 @@ class PreferenceMapperApp:
         self.root.update()
 
         vendor_filters = self.get_vendor_filters()
+        # Gather selected areas; when include_all_areas is ON, this will be ignored
+        selected_areas = []
+        if hasattr(self, "area_vars"):
+            selected_areas = [k for k, v in self.area_vars.items() if v.get() == 1]
+        include_all = hasattr(self, "include_all_areas") and self.include_all_areas.get() == 1
         all_preferences = defaultdict(lambda: defaultdict(list))  # {interface: {area: [dicts]}}
 
         for file in self.find_di_files():
-            if "/frontend/" in file:
-                area = "frontend"
-            elif "/adminhtml/" in file:
-                area = "adminhtml"
-            elif "/etc/" in file:
-                area = "global"
-            else:
-                area = "unknown"
+            # Determine area from path. Default to "global" if di.xml is directly under etc
+            area = "global"
+            m = re.search(r"/etc/([^/]+)/", file.replace("\\", "/"))
+            if m:
+                area = m.group(1)
+            # Respect area filters only when "include all" is OFF
+            if not include_all and selected_areas:
+                if area not in selected_areas:
+                    continue
 
             module_path = file.split("/etc/")[0]
             vendor_module_parts = module_path.strip("/").split("/")[-2:]
@@ -127,29 +165,101 @@ class PreferenceMapperApp:
 
     def display_results(self):
         self.tree.delete(*self.tree.get_children())
-        sort_mode = self.sort_mode.get()
+        order_mode = self.order_mode.get()
+        needle_raw = (self.quick_filter.get() or "").strip()
+        mode = getattr(self, "filter_mode", tk.StringVar(value="contains")).get()
+        case_sensitive = getattr(self, "filter_case", tk.IntVar(value=0)).get() == 1
+        # Prepare helpers for matching
+        if not case_sensitive:
+            needle = needle_raw.lower()
+        else:
+            needle = needle_raw
+        pattern = None
+        invalid_regex = False
+        if mode == "regex" and needle_raw:
+            try:
+                flags = 0 if case_sensitive else re.IGNORECASE
+                pattern = re.compile(needle_raw, flags)
+            except re.error:
+                invalid_regex = True
 
-        if sort_mode == "asc_name":
-            sorted_interfaces = sorted(self.results.items())
-        elif sort_mode == "desc_name":
-            sorted_interfaces = sorted(self.results.items(), reverse=True)
-        elif sort_mode in ("asc_count", "desc_count"):
-            reverse = sort_mode == "desc_count"
+        def match_text(haystack):
+            if not needle_raw:
+                return True
+            if mode == "regex":
+                if invalid_regex:
+                    return False
+                return bool(pattern.search(haystack))
+            if not case_sensitive:
+                hay = haystack.lower()
+                ned = needle
+            else:
+                hay = haystack
+                ned = needle
+            if mode == "contains":
+                return ned in hay
+            if mode == "startswith":
+                return hay.startswith(ned)
+            if mode == "endswith":
+                return hay.endswith(ned)
+            if mode == "equals":
+                return hay == ned
+            # Fallback to contains
+            return ned in hay
+
+        def entry_matches(interface_name, area_name, entry):
+            if not needle_raw:
+                return True
+            if match_text(interface_name):
+                return True
+            if match_text(entry.get("class", "")):
+                return True
+            if match_text(entry.get("module", "")):
+                return True
+            if match_text(area_name or ""):
+                return True
+            return False
+
+        filtered_results = {}
+        for interface, areas in self.results.items():
+            kept_areas = {}
+            for area, entries in areas.items():
+                kept_entries = [e for e in entries if entry_matches(interface, area, e)]
+                if kept_entries:
+                    kept_areas[area] = kept_entries
+            if kept_areas:
+                filtered_results[interface] = kept_areas
+
+        if order_mode == "asc_name":
+            sorted_interfaces = sorted(filtered_results.items())
+        elif order_mode == "desc_name":
+            sorted_interfaces = sorted(filtered_results.items(), reverse=True)
+        elif order_mode in ("asc_count", "desc_count"):
+            reverse = order_mode == "desc_count"
             sorted_interfaces = sorted(
-                self.results.items(),
+                filtered_results.items(),
                 key=lambda item: sum(len(entries) for entries in item[1].values()),
                 reverse=reverse
             )
         else:
-            sorted_interfaces = self.results.items()
+            sorted_interfaces = filtered_results.items()
+
+        # Show feedback if regex is invalid
+        if mode == "regex" and invalid_regex:
+            self.loading_label.config(text="⚠️ Invalid regex — showing no matches")
+        else:
+            self.loading_label.config(text="")
 
         for interface, areas in sorted_interfaces:
             count = sum(len(entries) for entries in areas.values())
             interface_label = f"{interface} ({count})"
             interface_node = self.tree.insert("", "end", text=interface_label, values=("", ""))
             for area, entries in sorted(areas.items()):
+                # Create an area node with count, then list entries under it
+                area_label = f"↳ {area} ({len(entries)})"
+                area_node = self.tree.insert(interface_node, "end", text=area_label, values=("", ""))
                 for entry in entries:
-                    self.tree.insert(interface_node, "end", text=f"↳ {area}", values=(entry["class"], entry["module"]))
+                    self.tree.insert(area_node, "end", text="└", values=(entry["class"], entry["module"]))
 
     def export_json(self):
         if not self.results:
